@@ -1,0 +1,364 @@
+---
+title: "**Photo Processing Progress Report**"
+author: "Idaho Dept. of Fish and Game"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    theme: cerulean
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 6
+    toc: no
+    toc_depth: 2
+params:
+  folder: NA
+---
+<img src="images/idfglogo.png" style="position:absolute;
+top:20px; right:20px; height:100px; width:87px" />
+
+***
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning=F, message=F)
+Sys.setenv(TZ='MST')
+```
+
+```{r packages}
+# Install/load required packages
+dependencies<-c("stringr","dplyr","exifr","ggplot2","knitr")
+
+for(i in 1:length(dependencies)){
+  if(dependencies[i] %in% installed.packages()==FALSE){
+    install.packages(dependencies[i])
+    require(dependencies[i],character.only=TRUE)
+  } else{
+    require(dependencies[i],character.only=TRUE)
+  }
+}
+```
+
+```{r summary}
+# SUMMARY
+## Total cameras
+region_folder <- gsub("\\\\","/", params$folder)
+reg <- region_folder
+pdir <- dirname(reg)
+gmus <- list.dirs(reg, recursive = F, full.names = T)
+cams <- list.dirs(gmus, recursive = F, full.names = T)
+n.cam <- length(cams)
+
+# Region name
+max<- max(str_count(reg, "/"))
+reg_name <- str_split(reg,"/")[[1]][max+1]
+    
+## Total cameras marked as finished
+finished <- "finished"
+cam.f <- str_subset(cams, finished)
+n.cam.f <- length(cam.f)
+
+## Total cameras marked as empty
+empty <- "empty"
+cam.e <- str_subset(cams, empty)
+n.cam.e <- length(cam.e)
+
+## Histogram of detections (0 or 1) by confidence level
+#library(ggplot2)
+```
+<h2><b>Summary for `r reg_name`</b></h2>
+<br>
+<h3>Total number of camera folders in `r reg_name`: <b>`r n.cam`</b></h3>
+<h3>Number of camera folders marked as 'finished': <b>`r n.cam.f`</b></h3>
+<h3>Number of camera folders marked as 'empty': <b>`r n.cam.e`</b></h3>
+<br><br>
+
+```{r error_checking}
+# ERROR CHECKING
+## Was the camera actually finished?
+### Check for csv file
+csvs <- character()
+csv.missing <- data.frame(GMU = character(),
+                          Cell = character(),
+                          stringsAsFactors=FALSE)
+csv.mult <- data.frame(GMU = character(),
+                          Cell = character(),
+                          stringsAsFactors=FALSE)
+for(i in 1:n.cam.f){
+  csv.f <- list.files(cam.f[i], pattern = "*.CSV$|*.csv$",
+                      recursive = F, full.names = T)
+  if(length(csv.f)>1){
+    max<- max(str_count(cam.f[i], "/"))
+    gmu.mult <- str_split(cam.f[i],"/")[[1]][max]
+    cam.mult <- str_split(cam.f[i],"/")[[1]][max+1]
+    csv.mult.sub <- cbind(gmu.mult,cam.mult)
+    csv.mult <- rbind(csv.mult,csv.mult.sub)
+  }
+  csv.info <- file.info(csv.f)
+  csv.info$mtime <- as.POSIXct(csv.info$mtime, tz = "MST")
+  csv.1 <- rownames(csv.info)[which.max(csv.info$mtime)]
+  csvs <- append(csvs, csv.1)
+  if(length(csv.1)==0){
+    max<- max(str_count(cam.f[i], "/"))
+    gmu.missing <- str_split(cam.f[i],"/")[[1]][max]
+    cam.missing <- str_split(cam.f[i],"/")[[1]][max+1]
+    csv.missing.sub <- cbind(gmu.missing,cam.missing)
+    csv.missing <- rbind(csv.missing,csv.missing.sub,
+                    stringsAsFactors = F)
+  }
+}
+
+### Check for CamID matches
+#### Read exifdata
+library(exifr)
+cam_csvs <- setdiff(cam.f,csv.missing$Folder)
+camid <- data.frame(GMU = character(), 
+                    Cell = character(),
+                    CamID = character(),
+                    stringsAsFactors = F)
+for(i in 1:length(cam_csvs)){
+  photos <- list.files(cam_csvs[i], pattern = "*.JPG$", 
+                       full.names = T,
+                       recursive = F)
+  photo1 <- sample(photos,1)
+  photo.dat <- read_exif(photo1, tags=c("UserLabel"))
+  max<- max(str_count(cam_csvs[i], "/"))
+  gmu <- str_split(cam_csvs[i],"/")[[1]][max]
+  cell <- str_split(cam_csvs[i],"/")[[1]][max+1]
+  camid.sub <- data.frame(GMU = gmu,
+                          Cell = cell,
+                          CamID = photo.dat$UserLabel,
+                          stringsAsFactors = F)
+  camid <- rbind(camid, camid.sub,
+                 stringsAsFactors = F)
+}
+
+#### Check if csv filename matches exifdata
+wrongname <- data.frame(GMU = character(),
+                        Cell = character(),
+                        CSV_File = character(),
+                        CamID = character(),
+                        stringsAsFactors = F)
+for(i in 1:length(csvs)){
+  max<- max(str_count(csvs[i], "/"))
+  csv.name <- str_split(csvs[i],"/")[[1]][max+1]
+  if(is.na(camid$CamID[i]) | str_detect(csv.name,camid$CamID[i])==FALSE){
+    wrongname.sub <- data.frame(GMU = camid$GMU[i],
+                                Cell = camid$Cell[i],
+                                CSV_File = csv.name,
+                                CamID = camid$CamID[i],
+                                stringsAsFactors = F)
+    wrongname <- rbind(wrongname, wrongname.sub,
+                       stringsAsFactors = F)
+  }
+}
+
+#### Read csv files, check if entered ID 
+#### matches exifdata
+library(dplyr)
+##### Read empty csv file to append
+csv.complete <- read.csv("files/EMPTY_IDFG_core_template.csv",
+                         stringsAsFactors = F)
+csv.complete$reg <- character()
+csv.complete$gmu <- character()
+csv.complete$cell <- character()
+wrongid <- data.frame(GMU = character(),
+                      Cell = character(), 
+                      Programmed_ID = character(),
+                      Timelapse_ID = character(),
+                      stringsAsFactors = F)
+for(i in 1:length(csvs)){
+  # Read csv data and append to master csv file
+  csv.dat <- read.csv(csvs[i], 
+                      stringsAsFactors = FALSE)
+  max<- max(str_count(csvs[i], "/"))
+  csv.dat$reg <- str_split(csvs[i],"/")[[1]][max-2]
+  csv.dat$gmu <- str_split(csvs[i],"/")[[1]][max-1]
+  csv.dat$cell <- str_split(csvs[i],"/")[[1]][max]
+  csv.complete <- rbind(csv.complete, csv.dat)
+  
+  # Compare CamID entered in photo data to programmed CamID in exifdata
+  csv.camid <- csv.dat %>%
+    dplyr::mutate(GMU = gmu, Cell = cell) %>%
+    dplyr::select(GMU, Cell, CamID) %>%
+    dplyr::distinct()
+  
+  if((nrow(csv.camid)==1 & is.na(csv.camid$CamID[1])) || (nrow(csv.camid)==1 & csv.camid$CamID[1] != camid$CamID[i])){
+    wrongid.sub <- data.frame(GMU = csv.camid$GMU,
+                              Cell = csv.camid$Cell,
+                              Programmed_ID = camid$CamID[i],
+                              Timelapse_ID = csv.camid$CamID)
+    wrongid <- rbind(wrongid,wrongid.sub)
+  } else if(nrow(csv.camid)>1){
+    wrongid.sub <- data.frame(GMU = csv.camid$GMU,
+                              Cell = csv.camid$Cell,
+                              Programmed_ID = rep(camid$CamID[i],nrow(csv.camid)),
+                              Timelapse_ID = csv.camid$CamID)
+    wrongid <- rbind(wrongid,wrongid.sub)
+  } 
+}
+
+csv.write <- csv.complete %>%
+  select(-c(X,reg,gmu,cell))
+#today <- format(Sys.Date(),"%Y_%m_%d")
+csv_folder <- file.path(pdir,"combined_csvs")
+if(!dir.exists(csv_folder)){
+  dir.create(csv_folder)
+}
+write.csv(csv.write,paste0(csv_folder,"/",reg_name,"_CSV_combined.csv"))
+
+### Check for Processor name
+missing_processor <- csv.complete %>%
+  dplyr::filter(is.na(Processor)) %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+
+### Check for triggermode
+missing_trigger <- csv.complete %>%
+  dplyr::filter(is.na(TriggerMode) | (TriggerMode != "T" & TriggerMode !="M")) %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+```
+<hr>
+<h2><b>Data entered and exported?</b></h2>
+<br>
+Below is a summary of common data completion issues.
+
+A complete CSV compiled from all finished cameras in `r reg_name` is available at: <b>`r paste0(csv_folder,"/",reg_name,"_CSV_combined.csv")`</b>
+<br><br>
+<h3>Cameras missing Timelapse CSV data file:</h3>
+`r knitr::kable(csv.missing)`
+<br><br>
+<h3>Cameras with multiple CSV files:</h3>
+`r knitr::kable(csv.mult)`
+<br><br>
+<h3>Cameras where the CSV file name does not contain/match the programmed Camera ID:</h3>
+`r knitr::kable(wrongname)`
+<br><br>
+<h3>Cameras where the ID entered in the Timelapse data does not match the programmed Camera ID and/or there were multiple camera IDs entered in Timelapse:</h3>
+`r knitr::kable(wrongid)`
+<br><br>
+<h3>Cameras missing 'Processor' in Timelapse CSV data file:</h3>
+`r knitr::kable(missing_processor)`
+<br><br>
+<h3>Cameras missing 'TriggerMode' in Timelapse CSV data file:</h3>
+`r knitr::kable(missing_trigger)`
+<br><br><br>
+```{r red_flags}
+## Other Red Flags
+### Empty and animal checked
+empty_animal <- csv.complete %>%
+  dplyr::filter(Animal == TRUE & Empty == TRUE) %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+### Empty and human checked
+empty_human <- csv.complete %>%
+  dplyr::filter(Human == TRUE & Empty == TRUE) %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+### Human and animal checked
+animal_human <- csv.complete %>%
+  dplyr::filter(Animal == TRUE & Human == TRUE) %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+### Animal but no species
+animal_nospecies <- csv.complete %>%
+  dplyr::filter(Animal == TRUE & NearSpecies1 == "none" &  FarSpecies == "none") %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+### Near species 1 but no count (not cows or dogs)
+nocounts <- csv.complete %>%
+  dplyr::filter(NearSpecies1 != "none" &  NearSp1Count == 0) %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID, NearSpecies1) %>% 
+  dplyr::tally()
+
+### Near species 2 present
+nrsp2 <- csv.complete %>%
+  dplyr::filter(NearSpecies2 != "none") %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID, NearSpecies1, NearSpecies2) %>% 
+  dplyr::tally()
+
+### Species uncertain
+spuncertain <- csv.complete %>%
+  dplyr::filter(SpeciesUncertain == TRUE) %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID, NearSpecies1) %>% 
+  dplyr::tally()
+```
+<hr>
+<h2><b>Other Red Flags</b></h2>
+<br>
+Below is a summary of common data entry issues. 
+
+Some of them may not be errors but would benefit from double-checking (e.g., having a second species is entirely possible but rare).
+<br><br>
+<h3>Empty and Animal Checked</h3>
+`r knitr::kable(empty_animal)`
+<br><br>
+<h3>Empty and Human Checked</h3>
+`r knitr::kable(empty_human)`
+<br><br>
+<h3>Human and Animal Checked</h3>
+`r knitr::kable(animal_human)`
+<br><br>
+<h3>Animal Checked but No Species Identified</h3>
+<br><br>
+`r knitr::kable(animal_nospecies)`
+<br><br>
+<h3>Species Identified but No Counts (no need to count humans, domestic animals, or livestock) </h3>
+`r knitr::kable(nocounts)`
+<br><br>
+<h3>Second Species Identified (no need to check common combinations of humans, domestic animals, and livestock)</h3>
+`r knitr::kable(nrsp2)`
+<br><br>
+<h3>Species Uncertain Checked</h3>
+`r knitr::kable(spuncertain)`
+<br><br><br>
+```{r wolves}
+## Are we catching Wolves??
+#### All wolves
+wolf.cam <- csv.complete %>%
+  dplyr::filter(NearSpecies1 == "wolf" | NearSpecies2 == "wolf") %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+wolf.sum <- wolf.cam %>%
+  ungroup %>%
+  summarise(Wolf_All = sum(n))
+
+#### Time-triggered wolves
+wolf.tl.cam <- csv.complete %>%
+  dplyr::filter((NearSpecies1 == "wolf" | NearSpecies2 == "wolf") && TriggerMode == "T") %>%
+  dplyr::mutate(GMU = gmu, Cell = cell) %>%
+  dplyr::group_by(GMU, Cell, CamID) %>% 
+  dplyr::tally()
+
+wolf.tl.sum <- wolf.tl.cam %>%
+  ungroup %>%
+  summarise(Wolf_TL = sum(n))
+
+```
+<hr>
+<h2><b>Well? Are we catching wolves??</b></h2>
+<br>
+<h3>Total number of wolf photos (motion- and time-triggered): <b>`r wolf.sum$Wolf_All`</b></h3>
+<h3>Total number of time-triggered wolf photos: <b>`r wolf.tl.sum$Wolf_TL`</b></h3>
+<br><br>
+<h3>Number of wolf photos by camera:</h3>
+`r knitr::kable(wolf.cam)`
+<br><br>
+<h3>Number of time-triggered wolf photos by camera:</h3>
+`r knitr::kable(wolf.tl.cam)`
+<br><br><br>
